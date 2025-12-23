@@ -1,0 +1,309 @@
+---
+title: "CRZ_AJE_analyses_2025DEC22"
+author: "Nicole Itzkowitz"
+date: "2025-12-22"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(janitor)
+library(sf)
+library(lubridate)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(spdep)
+library(sandwich)
+library(lmtest)
+library(openxlsx)
+```
+
+### data management
+```{r data, include=F, message=F}
+# CRZ geofence from:  https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data
+crz <- read_sf("/data/MTA Central Business District Geofence_ Beginning June 2024_20250619/geo_export_d6c2fec2-3927-49c2-98c0-6c2b3edffa39.shp")
+crz <- st_transform(crz, crs = "WGS84")
+
+# ctrl area created in QGIS
+ctrl <- read_sf("/data/crz_control.shp")
+ctrl <- st_transform(ctrl, crs = "WGS84")
+
+# crash data Jan 1 2024-June 30 2025 from OpenDataNYC
+crashes <- read_csv("/data/Motor_Vehicle_Collisions_-_Crashes_20250729.csv") %>% clean_names()
+# n = 132,729
+
+# person-level data for pts injured or killed Jan 1 2024-June 30 2025
+person <- read_csv("/data/Motor_Vehicle_Collisions_-_Person_20250830.csv") %>% clean_names() %>% dplyr::select(collision_id, person_id, crash_date, emotional_status, complaint, person_injury, bodily_injury, person_type)
+
+person$crash_date <- mdy(person$crash_date)
+
+length(unique(person$collision_id))
+# 145,010 crashes
+```
+
+```{r data management: person data ksi definitions}
+# adapted from leah code
+person <- person %>%
+  mutate(severity = case_when(
+    person_injury == 'Killed' ~ 'k',
+    person_injury == 'Injured' & emotional_status %in% c('Unconscious', 'Semiconscious', 'Incoherent') ~ 'a',
+    person_injury == 'Injured' & coalesce(emotional_status, 'Unknown') %in% c('Apparent Death', 'Shock', 'Conscious', 'Unknown', 'Does Not Apply') &
+      complaint %in% c('Amputation', 'Concussion', 'Internal', 'Severe Bleeding', 'Moderate Burn', 'Severe Burn', 'Fracture - Dislocation', 'Fracture - Distorted - Dislocation', 'Crush Injuries', 'Paralysis', 'Severe Lacerations') ~ 'a',
+    person_injury == 'Injured' & coalesce(emotional_status, 'Unknown') %in% c('Apparent Death', 'Shock', 'Conscious', 'Unknown', 'Does Not Apply') &
+      complaint %in% c('Minor Bleeding', 'Minor Burn', 'Complaint of Pain', 'Complaint of Pain or Nausea') &
+      bodily_injury == 'Eye' & year(crash_date) >= 2019 ~ 'b',
+    person_injury == 'Injured' & coalesce(emotional_status, 'Unknown') %in% c('Apparent Death', 'Shock', 'Conscious', 'Unknown', 'Does Not Apply') &
+      complaint %in% c('Minor Bleeding', 'Minor Burn', 'Complaint of Pain', 'Complaint of Pain or Nausea') &
+      bodily_injury == 'Eye' & year(crash_date) < 2019 ~ 'a',
+    person_injury == 'Injured' & coalesce(emotional_status, 'Unknown') %in% c('Apparent Death', 'Shock', 'Conscious', 'Unknown', 'Does Not Apply') &
+      complaint %in% c('Contusion - Bruise', 'Abrasion') ~ 'b',
+    person_injury == 'Injured' & coalesce(emotional_status, 'Unknown') %in% c('Apparent Death', 'Shock', 'Conscious', 'Unknown', 'Does Not Apply') &
+      complaint %in% c('Minor Bleeding', 'Minor Burn') &
+      coalesce(bodily_injury, 'Unknown') != 'Eye' ~ 'b',
+    person_injury == 'Injured' & coalesce(emotional_status, 'Unknown') %in% c('Apparent Death', 'Shock', 'Conscious', 'Unknown', 'Does Not Apply') &
+      complaint %in% c('Complaint of Pain', 'Complaint of Pain or Nausea') &
+      coalesce(bodily_injury, 'Unknown') != 'Eye' ~ 'c',
+    person_injury == 'Injured' & emotional_status == 'Conscious' & coalesce(complaint, 'Unknown') %in% c('Unknown', 'None Visible', 'Does Not Apply') &
+      coalesce(bodily_injury, 'Unknown') %in% c('Unknown', 'Does Not Apply') ~ 'u',
+    person_injury == 'Injured' & coalesce(emotional_status, 'Unknown') %in% c('Apparent Death', 'Shock', 'Conscious', 'Unknown', 'Does Not Apply') &
+      coalesce(complaint, 'Unknown') %in% c('Unknown', 'None Visible', 'Whiplash', 'Does Not Apply') ~ 'c',
+    person_injury == 'Injured' & emotional_status == 'Shock' & coalesce(complaint, 'Unknown') %in% c('Unknown', 'None Visible', 'Whiplash', 'Does Not Apply') &
+      coalesce(bodily_injury, 'Unknown') %in% c('Unknown', 'Does Not Apply', 'Whiplash') ~ 'c',
+    TRUE ~ 'u'
+  ))
+```
+
+```{r data management: aggregate person data to crash level}
+# adapted from Leah's code
+
+ksi <- person %>%
+  group_by(collision_id) %>%
+  summarise(ksi_crash = any(severity %in% c('k','a'))) %>%
+  mutate(ksi_crash = as.integer(ksi_crash))
+
+# join to crash data
+crashes <- crashes %>%
+  left_join(ksi, by="collision_id") %>%
+  mutate(ksi_crash=if_else(is.na(ksi_crash),0, ksi_crash),
+         non_ksi_crash=if_else(ksi_crash==0,1,0))
+```
+
+
+```{r data management zones, results=FALSE, message=FALSE}
+## attribute crashes to in/out CRZ based on geofence zone
+
+# remove crashes with missing values for long/lat (n = 7,632)
+crashes <- dplyr::filter(crashes, !is.na(crashes$longitude))
+# remove crashes with zero values for long/lat (note: some of these have street addresses that theoretically could be geocoded; n= 1,444)
+crashes <- dplyr::filter(crashes, crashes$longitude !=0)
+
+# final count n = 123,653 crashes (across all boroughs)
+
+# convert crashes into a shapefile
+crashes_sf <- st_as_sf(crashes,
+                       coords = c("longitude", "latitude"),
+                       crs = "WGS84")
+
+# attribute crash points to within CRZ
+within_crz <- apply(st_within(crashes_sf, crz, sparse = FALSE), 1, any)
+crashes_sf$crz <- as.integer(within_crz)
+
+# attribute crash points to control zone
+within_ctrl <- apply(st_within(crashes_sf, ctrl, sparse = FALSE), 1, any)
+crashes_sf$ctrl <- as.integer(within_ctrl)
+
+# crz_ctrl variable
+crashes_sf$crz_ctrl <- ifelse(crashes_sf$crz == 1, 1,
+                              ifelse(crashes_sf$ctrl == 1, 0, NA))
+
+crashes_sf <- select(crashes_sf, -c("crz", "ctrl"))
+
+## subset data to only crz and ctrl crashes
+df <- dplyr::filter(crashes_sf, crashes_sf$crz_ctrl == 0 | crashes_sf$crz_ctrl == 1)
+# n = 18,541 crashes within crz and ctrl zones
+
+# df: each row represents a crash event, and crz_ctrl represents whether it was in  the crz or not
+```
+
+```{r data management defining crash types}
+# code adapted from Leah script- define crash subtypes
+df <- df %>%
+  mutate(injury_crash=if_else(number_of_persons_injured>0,1,0),
+         killed_crash=if_else(number_of_persons_killed>0,1,0),
+         injury_killed_crash=if_else((number_of_persons_injured>0 | number_of_persons_killed>0),1,0),
+         ped_crash=if_else((number_of_pedestrians_injured>0 | number_of_pedestrians_killed>0),1,0),
+         cyc_crash=if_else((number_of_cyclist_injured>0 | number_of_cyclist_killed>0),1,0),
+         non_inj_crash=if_else(number_of_persons_injured<1 & number_of_persons_killed<1, 1,0))
+```
+
+```{r data management zone month}
+# create month variable
+df$crash_date <- mdy(df$crash_date)
+df$month_year <- paste0(year(df$crash_date), "-", sprintf("%02d",month(df$crash_date)))
+
+#df$pre_post <- ifelse(df$crash_date > as.Date("2025-01-05"), 1, 0)
+
+# aggregate by month year
+zone_month_counts <- df %>%
+  group_by(month_year, crz_ctrl #, pre_post
+           ) %>%
+  summarise(count = n(), .groups = "drop")
+
+zone_month_counts <- as.data.frame(zone_month_counts)
+zone_month_counts <- select(zone_month_counts, -"geometry")
+zone_month_counts$zone <- as.factor(ifelse(zone_month_counts$crz_ctrl == 1, "crz", "ctrl"))
+
+```
+
+## did plot
+```{r did plot zone months}
+summary(zone_month_counts$count)
+
+zone_month_counts %>% 
+  group_by(month_year, zone) %>%
+
+  ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
+  geom_line() +
+  labs(x = "month", y = "zone count", color = "CRZ") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 2)]) +
+  geom_vline(xintercept = "2025-01", linetype = "solid", color = "black") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1)) -> fig1
+
+# save image as pdf
+ggsave("fig1.pdf", plot = fig1, device = "pdf", height = 6, width = 8, units = "in")
+
+```
+
+## did: all crashes
+```{r did zone months set up}
+zone_month_counts$pre_post <- ifelse(grepl("2025", zone_month_counts$month_year), 1, 0)
+```
+
+```{r did zone months}
+did_zone_month <- glm(count ~ pre_post + crz_ctrl + pre_post*crz_ctrl, data = zone_month_counts, family = "poisson")
+
+summary(did_zone_month)
+exp(coef(did_zone_month))
+exp(confint(did_zone_month))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_zone_month, cluster = ~month_year)
+exp(coef(coeftest(did_zone_month, vcov = clustered_vcov)))
+exp(confint(coeftest(did_zone_month, vcov = clustered_vcov)))
+```
+
+## did: subtypes of crashes
+```{r did subtypes set up}
+zone_month_counts_sub <- df %>%
+  group_by(month_year, crz_ctrl) %>%
+  summarise(
+    count = n(),
+    across(
+      c(injury_crash, killed_crash, injury_killed_crash, ksi_crash, non_ksi_crash, ped_crash, cyc_crash, non_inj_crash),
+      ~ sum(.x, na.rm = TRUE),
+      .names = "{.col}_count"
+    ),
+    .groups = "drop"
+  )
+zone_month_counts_sub <- as.data.frame(zone_month_counts_sub)
+zone_month_counts_sub <- select(zone_month_counts_sub, -"geometry")
+zone_month_counts_sub$zone <- as.factor(ifelse(zone_month_counts_sub$crz_ctrl == 1, "crz", "ctrl"))
+
+zone_month_counts_sub$pre_post <- ifelse(grepl("2025", zone_month_counts_sub$month_year), 1, 0)
+```
+
+```{r did subtypes}
+## injury or fatality
+did_killed_or_injured <- glm(injury_killed_crash_count ~ pre_post + crz_ctrl + pre_post*crz_ctrl, data = zone_month_counts_sub, family = "poisson")
+exp(coef(did_killed_or_injured))
+exp(confint(did_killed_or_injured))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_killed_or_injured, cluster = ~month_year)
+exp(coef(coeftest(did_killed_or_injured, vcov = clustered_vcov)))
+exp(confint(coeftest(did_killed_or_injured, vcov = clustered_vcov)))
+
+## serious injury or fatality
+did_ksi <- glm(ksi_crash_count ~ pre_post + crz_ctrl + pre_post*crz_ctrl, data = zone_month_counts_sub, family = "poisson")
+exp(coef(did_ksi))
+exp(confint(did_ksi))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_ksi, cluster = ~month_year)
+exp(coef(coeftest(did_ksi, vcov = clustered_vcov)))
+exp(confint(coeftest(did_ksi, vcov = clustered_vcov)))
+
+## pedestrian injury or fatality
+did_ped <- glm(ped_crash_count ~ pre_post + crz_ctrl + pre_post*crz_ctrl, data = zone_month_counts_sub, family = "poisson")
+exp(coef(did_ped))
+exp(confint(did_ped))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_ped, cluster = ~month_year)
+exp(coef(coeftest(did_ped, vcov = clustered_vcov)))
+exp(confint(coeftest(did_ped, vcov = clustered_vcov)))
+
+## cyclist injury or fatality
+did_cycle <- glm(cyc_crash_count ~ pre_post + crz_ctrl + pre_post*crz_ctrl, data = zone_month_counts_sub, family = "poisson")
+exp(coef(did_cycle))
+exp(confint(did_cycle))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_cycle, cluster = ~month_year)
+exp(coef(coeftest(did_cycle, vcov = clustered_vcov)))
+exp(confint(coeftest(did_cycle, vcov = clustered_vcov)))
+
+## non injurious
+did_non_inj <- glm(non_inj_crash_count ~ pre_post + crz_ctrl + pre_post*crz_ctrl, data = zone_month_counts_sub, family = "poisson")
+exp(coef(did_non_inj))
+exp(confint(did_non_inj))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_non_inj, cluster = ~month_year)
+exp(coef(coeftest(did_non_inj, vcov = clustered_vcov)))
+exp(confint(coeftest(did_non_inj, vcov = clustered_vcov)))
+
+# no serious injury or fatality
+did_non_ksi <- glm(non_ksi_crash_count ~ pre_post + crz_ctrl + pre_post*crz_ctrl, data = zone_month_counts_sub, family = "poisson")
+exp(coef(did_non_ksi))
+exp(confint(did_non_ksi))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_non_ksi, cluster = ~month_year)
+exp(coef(coeftest(did_non_ksi, vcov = clustered_vcov)))
+exp(confint(coeftest(did_non_ksi, vcov = clustered_vcov)))
+```
+
+## total crash counts and averages
+```{r total count by crash subtype}
+# total N for each crash subtype
+counts_all <- zone_month_counts_sub %>% 
+  group_by(pre_post, crz_ctrl) %>%
+  summarise(
+    across(
+      c(count, injury_crash_count, killed_crash_count, injury_killed_crash_count, ksi_crash_count, non_ksi_crash_count, ped_crash_count, cyc_crash_count, non_inj_crash_count),
+      ~ sum(.x, na.rm = TRUE),
+      .names = "{.col}_all"
+    ),
+    .groups = "drop")
+```
+
+```{r avg count by crash subtype}
+# avg counts per zone-month
+avg_all <- zone_month_counts_sub %>% 
+  group_by(pre_post, crz_ctrl) %>%
+  summarise(
+    across(
+      c(count, injury_crash_count, killed_crash_count, injury_killed_crash_count, ksi_crash_count, non_ksi_crash_count, ped_crash_count, cyc_crash_count, non_inj_crash_count),
+      ~ mean(.x, na.rm = TRUE),
+      .names = "{.col}_avg"
+    ),
+    .groups = "drop")
+```
