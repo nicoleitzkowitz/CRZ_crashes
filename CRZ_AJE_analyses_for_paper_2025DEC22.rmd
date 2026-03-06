@@ -27,19 +27,19 @@ library(openxlsx)
 ### data management
 ```{r data, include=F, message=F}
 # CRZ geofence from:  https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data
-crz <- read_sf("/data/MTA Central Business District Geofence_ Beginning June 2024_20250619/geo_export_d6c2fec2-3927-49c2-98c0-6c2b3edffa39.shp")
+crz <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/MTA Central Business District Geofence_ Beginning June 2024_20250619/geo_export_d6c2fec2-3927-49c2-98c0-6c2b3edffa39.shp")
 crz <- st_transform(crz, crs = "WGS84")
 
-# ctrl area created in QGIS
-ctrl <- read_sf("/data/crz_control.shp")
+# ctrl area created in QGIS (available on my github)
+ctrl <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/control_shapefile/crz_control.shp")
 ctrl <- st_transform(ctrl, crs = "WGS84")
 
 # crash data Jan 1 2024-June 30 2025 from OpenDataNYC
-crashes <- read_csv("/data/Motor_Vehicle_Collisions_-_Crashes_20250729.csv") %>% clean_names()
+crashes <- read_csv("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/Motor_Vehicle_Collisions_-_Crashes_20250729.csv") %>% clean_names()
 # n = 132,729
 
 # person-level data for pts injured or killed Jan 1 2024-June 30 2025
-person <- read_csv("/data/Motor_Vehicle_Collisions_-_Person_20250830.csv") %>% clean_names() %>% dplyr::select(collision_id, person_id, crash_date, emotional_status, complaint, person_injury, bodily_injury, person_type)
+person <- read_csv("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes//data/Motor_Vehicle_Collisions_-_Person_20250830.csv") %>% clean_names() %>% dplyr::select(collision_id, person_id, crash_date, emotional_status, complaint, person_injury, bodily_injury, person_type)
 
 person$crash_date <- mdy(person$crash_date)
 
@@ -307,3 +307,224 @@ avg_all <- zone_month_counts_sub %>%
     ),
     .groups = "drop")
 ```
+
+## Addressing reviewer comments: alternative control units to assess possible effect of spillover from CRZ into control
+
+### boston
+boston data
+```{r boston data management}
+# boston crash shapefiles are available from https://apps.crashdata.dot.mass.gov/cdp/home
+boston24 <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/boston/2024_Crashes/2024_Crashes.shp") %>% clean_names() %>%
+  filter(city_town == "BOSTON")
+  
+boston25 <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/boston/2025_Crashes/2025_Crashes.shp") %>% clean_names() %>%
+  filter(city_town == "BOSTON") %>% filter()
+  
+boston <- rbind(boston24, boston25)
+#rm(boston24, boston25)
+
+# restrict to June 30 2025
+boston <- filter(boston, crash_da_1 >= "2024-01-01" & crash_da_1 <= "2025-06-30")
+
+# restrict to local roads only
+boston <- filter(boston, jurisdictn == "City or Town accepted road")
+```
+
+boston count per month
+```{r boston by month}
+# create month variable
+boston$month_year <- paste0(year(boston$crash_da_1), "-", sprintf("%02d",month(boston$crash_da_1)))
+
+#df$pre_post <- ifelse(df$crash_date > as.Date("2025-01-05"), 1, 0)
+
+# aggregate by month year
+boston_zone_month_counts <- boston %>%
+  group_by(month_year
+           ) %>%
+  summarise(count = n(), .groups = "drop")
+
+boston_zone_month_counts <- as.data.frame(boston_zone_month_counts)
+boston_zone_month_counts <- select(boston_zone_month_counts, -"geometry")
+
+boston_zone_month_counts$ctrl_bos <- 1
+
+# add null cols for join
+boston_zone_month_counts$crz <- 0
+boston_zone_month_counts$ctrl <- 0
+boston_zone_month_counts$ctrl_si <- 0
+boston_zone_month_counts$ctrl_bk <- 0
+```
+
+### staten island & brooklyn
+```{r si bk data management}
+# load borough boundaries without arterial roads: created in QGIS (available on my github)
+boros <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/boros_without_arterials/boros_without_arterials.shp") |> clean_names()
+staten <- filter(boros, boroname == "Staten Island")
+brooklyn <- filter(boros, boroname == "Brooklyn")
+
+# attribute crash points to within SI and within BK
+within_si <- apply(st_within(crashes_sf, staten, sparse = FALSE), 1, any)
+crashes_sf$ctrl_si <- as.integer(within_si)
+
+within_bk <- apply(st_within(crashes_sf, brooklyn, sparse = FALSE), 1, any)
+crashes_sf$ctrl_bk <- as.integer(within_bk)
+```
+
+```{r si bk zone month}
+# subset to only crashes in crz, ctrl, ctrl_si and ctrl_bk
+df <- dplyr::filter(crashes_sf, crashes_sf$crz_ctrl == 1 | crashes_sf$crz_ctrl == 0 | crashes_sf$ctrl_si == 1 | crashes_sf$ctrl_bk == 1)
+
+# create month-year variable
+df$crash_date <- mdy(df$crash_date)
+df$month_year <- paste0(year(df$crash_date), "-", sprintf("%02d",month(df$crash_date)))
+
+# separate crz_ctrl into indicator variables
+df$crz <- ifelse(df$crz_ctrl == 1, 1, 0)
+df$crz <- ifelse(is.na(df$crz_ctrl), 0, df$crz)
+df$ctrl <- ifelse(df$crz_ctrl == 0, 1, 0)
+df$ctrl <- ifelse(is.na(df$crz_ctrl), 0, df$ctrl)
+
+# aggregate by month year
+zone_month_counts <- df %>%
+  group_by(month_year, crz, ctrl, ctrl_bk, ctrl_si
+           ) %>%
+  summarise(count = n(), .groups = "drop")
+
+zone_month_counts <- as.data.frame(zone_month_counts)
+zone_month_counts <- select(zone_month_counts, -geometry)
+zone_month_counts$ctrl_bos <- 0
+```
+
+```{r join zone-month datasets}
+zone_month_counts_all <- rbind(zone_month_counts, boston_zone_month_counts)
+zone_month_counts_all <- select(zone_month_counts_all, c(month_year, crz, ctrl, ctrl_bk, ctrl_si, ctrl_bos, count))
+
+zone_month_counts_all$zone <- case_when(zone_month_counts_all$crz == 1 ~ "CRZ",
+                                        zone_month_counts_all$ctrl == 1 ~ "ctrl- lower manhattan",
+                                        zone_month_counts_all$ctrl_si == 1 ~ "ctrl- staten island",
+                                        zone_month_counts_all$ctrl_bk == 1 ~ "ctrl- brooklyn",
+                                        zone_month_counts_all$ctrl_bos == 1 ~ "ctrl- boston")
+```
+
+```{r plot all control options}
+# all
+zone_month_counts_all %>% 
+  group_by(month_year, zone) %>%
+
+  ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
+  geom_line() +
+  labs(x = "month", y = "zone count", color = "CRZ") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 2)]) +
+  geom_vline(xintercept = "2025-01", linetype = "solid", color = "black") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+#crz, ctrl and boston
+zone_month_counts_all %>% 
+  filter(zone == "CRZ" | zone == "ctrl- boston" 
+#         | zone == "ctrl- lower manhattan"
+         ) %>%
+  group_by(month_year, zone) %>%
+ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
+  geom_line() +
+  labs(x = "month", y = "zone count", color = "CRZ") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 2)]) +
+  geom_vline(xintercept = "2025-01", linetype = "solid", color = "black") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+#crz, ctrl and si
+zone_month_counts_all %>% 
+  filter(zone == "CRZ" | zone == "ctrl- staten island" 
+ #        | zone == "ctrl- lower manhattan"
+         ) %>%
+  group_by(month_year, zone) %>%
+ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
+  geom_line() +
+  labs(x = "month", y = "zone count", color = "CRZ") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 2)]) +
+  geom_vline(xintercept = "2025-01", linetype = "solid", color = "black") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+#crz, ctrl and bk
+zone_month_counts_all %>% 
+  filter(zone == "CRZ" | zone == "ctrl- brooklyn" 
+ #        | zone == "ctrl- lower manhattan"
+         ) %>%
+  group_by(month_year, zone) %>%
+ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
+  geom_line() +
+  labs(x = "month", y = "zone count", color = "CRZ") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 2)]) +
+  geom_vline(xintercept = "2025-01", linetype = "solid", color = "black") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+# crz, si and bos
+zone_month_counts_all %>% 
+  filter(zone == "CRZ" | zone == "ctrl- staten island" 
+         | zone == "ctrl- boston"
+         ) %>%
+  group_by(month_year, zone) %>%
+ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
+  geom_line() +
+  labs(x = "month", y = "zone count", color = "CRZ") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 2)]) +
+  geom_vline(xintercept = "2025-01", linetype = "solid", color = "black") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+#### did with alternative controls 
+```{r did set up 2}
+# define pre/post variable
+zone_month_counts_all$pre_post <- ifelse(grepl("2025", zone_month_counts_all$month_year), 1, 0)
+
+# create datasets for each: boston, si
+zone_month_counts_boston <- filter(zone_month_counts_all, crz == 1 | ctrl_bos == 1) 
+zone_month_counts_boston <-  select(zone_month_counts_boston, c(month_year, crz, ctrl_bos, count, pre_post, zone)) 
+
+zone_month_counts_si <- filter(zone_month_counts_all, crz == 1 | ctrl_si == 1) 
+zone_month_counts_si <-  select(zone_month_counts_si, c(month_year, crz, ctrl_si, count, pre_post, zone)) 
+```
+
+```{r did boston}
+did_boston <- glm(count ~ pre_post + crz + pre_post*crz, data = zone_month_counts_boston, family = "poisson")
+
+summary(did_boston)
+exp(coef(did_boston))
+exp(confint(did_boston))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_boston, cluster = ~month_year)
+exp(coef(coeftest(did_boston, vcov = clustered_vcov)))
+exp(confint(coeftest(did_boston, vcov = clustered_vcov)))
+```
+```{r did si}
+did_si <- glm(count ~ pre_post + crz + pre_post*crz, data = zone_month_counts_si, family = "poisson")
+
+summary(did_si)
+exp(coef(did_si))
+exp(confint(did_si))
+
+#cluster-robust standard errors
+clustered_vcov <- vcovCL(did_si, cluster = ~month_year)
+exp(coef(coeftest(did_si, vcov = clustered_vcov)))
+exp(confint(coeftest(did_si, vcov = clustered_vcov)))
+```
+
+```{r}
+counts_all <- zone_month_counts_all %>% 
+  group_by(pre_post, zone) %>%
+  summarise(
+    across(count,
+      ~ sum(.x, na.rm = TRUE),
+      .names = "{.col}_all"
+    ),
+    .groups = "drop")
+```
+
