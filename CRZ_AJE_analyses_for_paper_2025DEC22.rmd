@@ -464,7 +464,7 @@ ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
 
 
 # crz, si and bos
-zone_month_counts_all %>% 
+fig_supp1 <- zone_month_counts_all %>% 
   filter(zone == "CRZ" | zone == "ctrl- staten island" 
          | zone == "ctrl- boston"
          ) %>%
@@ -477,6 +477,8 @@ ggplot(aes(x = month_year, y = count, color = zone, group = zone)) +
   theme_minimal() +
    theme(axis.text.x = element_text(angle = 90, hjust = 1))
 
+# save image as pdf
+ggsave("fig_supp1.pdf", plot = fig_supp1, device = "pdf", height = 6, width = 8, units = "in")
 ```
 
 #### did with alternative controls 
