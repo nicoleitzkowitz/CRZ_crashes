@@ -27,19 +27,19 @@ library(openxlsx)
 ### data management
 ```{r data, include=F, message=F}
 # CRZ geofence from:  https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data
-crz <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/MTA Central Business District Geofence_ Beginning June 2024_20250619/geo_export_d6c2fec2-3927-49c2-98c0-6c2b3edffa39.shp")
+crz <- read_sf("/data/MTA Central Business District Geofence_ Beginning June 2024_20250619/geo_export_d6c2fec2-3927-49c2-98c0-6c2b3edffa39.shp")
 crz <- st_transform(crz, crs = "WGS84")
 
 # ctrl area created in QGIS (available on my github)
-ctrl <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/control_shapefile/crz_control.shp")
+ctrl <- read_sf("/data/control_shapefile/crz_control.shp")
 ctrl <- st_transform(ctrl, crs = "WGS84")
 
 # crash data Jan 1 2024-June 30 2025 from OpenDataNYC
-crashes <- read_csv("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/Motor_Vehicle_Collisions_-_Crashes_20250729.csv") %>% clean_names()
+crashes <- read_csv("data/Motor_Vehicle_Collisions_-_Crashes_20250729.csv") %>% clean_names()
 # n = 132,729
 
 # person-level data for pts injured or killed Jan 1 2024-June 30 2025
-person <- read_csv("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes//data/Motor_Vehicle_Collisions_-_Person_20250830.csv") %>% clean_names() %>% dplyr::select(collision_id, person_id, crash_date, emotional_status, complaint, person_injury, bodily_injury, person_type)
+person <- read_csv("/data/Motor_Vehicle_Collisions_-_Person_20250830.csv") %>% clean_names() %>% dplyr::select(collision_id, person_id, crash_date, emotional_status, complaint, person_injury, bodily_injury, person_type)
 
 person$crash_date <- mdy(person$crash_date)
 
@@ -314,10 +314,10 @@ avg_all <- zone_month_counts_sub %>%
 boston data
 ```{r boston data management}
 # boston crash shapefiles are available from https://apps.crashdata.dot.mass.gov/cdp/home
-boston24 <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/boston/2024_Crashes/2024_Crashes.shp") %>% clean_names() %>%
+boston24 <- read_sf("/data/boston/2024_Crashes/2024_Crashes.shp") %>% clean_names() %>%
   filter(city_town == "BOSTON")
   
-boston25 <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/boston/2025_Crashes/2025_Crashes.shp") %>% clean_names() %>%
+boston25 <- read_sf("/data/boston/2025_Crashes/2025_Crashes.shp") %>% clean_names() %>%
   filter(city_town == "BOSTON") %>% filter()
   
 boston <- rbind(boston24, boston25)
@@ -358,7 +358,7 @@ boston_zone_month_counts$ctrl_bk <- 0
 ### staten island & brooklyn
 ```{r si bk data management}
 # load borough boundaries without arterial roads: created in QGIS (available on my github)
-boros <- read_sf("/Users/ni2267/Documents/BEH/CRZ/KSI_crashes/data/boros_without_arterials/boros_without_arterials.shp") |> clean_names()
+boros <- read_sf("/data/boros_without_arterials/boros_without_arterials.shp") |> clean_names()
 staten <- filter(boros, boroname == "Staten Island")
 brooklyn <- filter(boros, boroname == "Brooklyn")
 
